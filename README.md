@@ -1,4 +1,4 @@
-# Arbos
+# Logos
 
  
  A Ralph-loop combined with a Discord bot.
@@ -7,7 +7,7 @@
 
 # The Design
 
-Arbos loops a `GOAL.md` through a coding agent, one step at a time.
+Logos loops a `GOAL.md` through a coding agent, one step at a time.
 
 ```
                                      ┌────── [GOAL.md] ────────┐
@@ -22,20 +22,19 @@ Each step is a fresh `claude` CLI invocation. Output streams back to Discord in 
 ## Requirements
 
 - [Discord Bot token](https://discord.com/developers/applications)
-- [OpenRouter API key](https://openrouter.ai/keys)
-- Node.js, [`claude` CLI](https://docs.anthropic.com/en/docs/claude-cli), and [pm2](https://pm2.keymetrics.io/)
+- Node.js, [`claude` CLI](https://docs.anthropic.com/en/docs/claude-cli) (logged in with a Claude subscription), and [pm2](https://pm2.keymetrics.io/)
 
 ## Getting started
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/run.sh | bash
+curl -fsSL https://raw.githubusercontent.com/unarbos/logos/main/run.sh | bash
 ```
 
 Or manually:
 
 ```sh
-git clone https://github.com/unarbos/arbos.git && cd arbos
-./run.sh <discord_token> <guild_id> <openrouter_key>
+git clone https://github.com/unarbos/logos.git && cd logos
+./run.sh <discord_token> <guild_id>
 ```
 
 ## Usage
@@ -52,7 +51,7 @@ All interaction happens through Discord slash commands.
 | `/delay <mins>` | Set minutes between steps |
 | `/goal [content]` | View or update the goal |
 | `/state` | View the agent's STATE.md |
-| `/status` | Show Arbos status and active loops |
+| `/status` | Show Logos status and active loops |
 | `/pin [content]` | View or append operator pins |
 | `/cwd [path]` | View or set the working directory |
 | `/env set/remove/list` | Manage encrypted environment variables |

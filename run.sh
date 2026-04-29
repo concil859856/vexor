@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Arbos — one-command bootstrap
+# Logos — one-command bootstrap
 #
 # Usage:
-#   ./run.sh [discord_token] [guild_id] [openrouter_key]
+#   ./run.sh [discord_token] [guild_id]
 #
-# All three arguments are optional if they were previously saved to the vault
+# Both arguments are optional if they were previously saved to the vault
 #
 
 set -e
@@ -73,11 +73,12 @@ cd "$SCRIPT_DIR"
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 printf "\n${CYAN}${BOLD}"
-printf "      _         _               \n"
-printf "     / \\   _ __| |__   ___  ___ \n"
-printf "    / _ \\ | '__| '_ \\ / _ \\/ __|\n"
-printf "   / ___ \\| |  | |_) | (_) \\__ \\\\\n"
-printf "  /_/   \\_\\_|  |_.__/ \\___/|___/\n"
+printf "  _                            \n"
+printf " | |    ___   __ _  ___  ___  \n"
+printf " | |   / _ \\ / _\` |/ _ \\/ __| \n"
+printf " | |__| (_) | (_| | (_) \\__ \\ \n"
+printf " |_____\\___/ \\__, |\\___/|___/ \n"
+printf "             |___/            \n"
 printf "${NC}\n"
 
 # ── 1. Install missing tools ────────────────────────────────────────────────
@@ -170,11 +171,10 @@ vault_get() {
 
 DISCORD_TOKEN="${1:-}"
 GUILD_ID="${2:-}"
-OPENROUTER_KEY="${3:-}"
-
+EXTERNAL_CHANNELS="${3:-}"
 if [ -z "$DISCORD_TOKEN" ]; then DISCORD_TOKEN=$(vault_get DISCORD_TOKEN); fi
 if [ -z "$GUILD_ID" ];       then GUILD_ID=$(vault_get GUILD_ID); fi
-if [ -z "$OPENROUTER_KEY" ]; then OPENROUTER_KEY=$(vault_get OPENROUTER_KEY); fi
+if [ -z "$EXTERNAL_CHANNELS" ]; then EXTERNAL_CHANNELS=$(env_val EXTERNAL_CHANNELS); fi
 
 if [ -z "$DISCORD_TOKEN" ]; then
     printf "  ${BOLD}Discord bot token:${NC} " && read -rs DISCORD_TOKEN && printf "\n"
@@ -186,13 +186,10 @@ if [ -z "$GUILD_ID" ]; then
     [ -n "$GUILD_ID" ] || die "Guild ID is required"
     NEED_SEED=true
 fi
-if [ -z "$OPENROUTER_KEY" ]; then
-    printf "  ${BOLD}OpenRouter API key:${NC} " && read -rs OPENROUTER_KEY && printf "\n"
-    [ -n "$OPENROUTER_KEY" ] || die "OpenRouter key is required"
-    NEED_SEED=true
+if [ -z "$EXTERNAL_CHANNELS" ]; then
+    printf "  ${BOLD}External channel IDs (comma-separated, or Enter to skip):${NC} " && read -r EXTERNAL_CHANNELS
 fi
-
-if [ -n "$1" ] || [ -n "$2" ] || [ -n "$3" ]; then
+if [ -n "$1" ] || [ -n "$2" ]; then
     NEED_SEED=true
 fi
 
@@ -205,8 +202,9 @@ fi
 cat > .env <<EOF
 VAULT_KEY=${VAULT_KEY}
 WORKSPACE_ROOT=./workspace
+EXTERNAL_CHANNELS=${EXTERNAL_CHANNELS}
 EOF
-ok ".env written (vault key only — secrets stored in encrypted vault)"
+ok ".env written"
 
 printf "\n"
 
@@ -224,9 +222,8 @@ if [ "$NEED_SEED" = true ]; then
     run "Seeding secrets into encrypted vault" \
         node dist/seed-vault.js \
             "DISCORD_TOKEN=${DISCORD_TOKEN}" \
-            "GUILD_ID=${GUILD_ID}" \
-            "OPENROUTER_KEY=${OPENROUTER_KEY}"
-    ok "Credentials stored in ~/.arbos/vault.enc"
+            "GUILD_ID=${GUILD_ID}"
+    ok "Credentials stored in ~/.logos/vault.enc"
 fi
 
 printf "\n"
@@ -244,9 +241,9 @@ printf "\n"
 
 # ── 5. Launch ────────────────────────────────────────────────────────────────
 
-printf "  ${BOLD}Starting Arbos${NC}\n\n"
+printf "  ${BOLD}Starting Logos${NC}\n\n"
 
-pm2 delete arbos >/dev/null 2>&1 || true
+pm2 delete logos >/dev/null 2>&1 || true
 run "Starting PM2 process" pm2 start ecosystem.config.cjs
 pm2 save --force >/dev/null 2>&1
 ok "PM2 state saved"
@@ -260,14 +257,14 @@ printf "\n"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
-printf "  ${GREEN}${BOLD}Arbos is running${NC}\n"
+printf "  ${GREEN}${BOLD}Logos is running${NC}\n"
 printf "\n"
 printf "  ${BOLD}Logs${NC}\n"
-printf "    pm2 logs arbos         %s bot output\n" "${DIM}—${NC}"
+printf "    pm2 logs logos         %s bot output\n" "${DIM}—${NC}"
 printf "    tail -f %s  %s tsc watcher\n" "$TSC_LOG" "${DIM}—${NC}"
 printf "\n"
 printf "  ${BOLD}Manage${NC}\n"
-printf "    pm2 stop arbos         %s stop bot\n" "${DIM}—${NC}"
-printf "    pm2 restart arbos      %s restart bot\n" "${DIM}—${NC}"
+printf "    pm2 stop logos         %s stop bot\n" "${DIM}—${NC}"
+printf "    pm2 restart logos      %s restart bot\n" "${DIM}—${NC}"
 printf "    kill %s                 %s stop tsc watcher\n" "$TSC_PID" "${DIM}—${NC}"
 printf "\n"

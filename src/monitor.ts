@@ -43,7 +43,7 @@ export async function initMonitor(
 
   flushTimer = setInterval(() => flushBuffer(), FLUSH_INTERVAL_MS);
 
-  mlog("info", "boot", "Arbos monitor initialized", {
+  mlog("info", "boot", "Logos monitor initialized", {
     cwd: resolve(config.workspaceRoot),
     pid: process.pid,
     nodeVersion: process.version,
@@ -76,16 +76,21 @@ async function ensureChannel(): Promise<string | null> {
     }
   }
 
-  console.log(`[monitor] Creating #${MONITOR_CHANNEL_NAME}`);
-  const created = await guild.channels.create({
-    name: MONITOR_CHANNEL_NAME,
-    type: ChannelType.GuildText,
-    topic: `Arbos process monitor — CWD: ${resolve(monitorConfig!.workspaceRoot)}`,
-    reason: "Arbos monitor channel auto-created",
-  });
+  try {
+    console.log(`[monitor] Creating #${MONITOR_CHANNEL_NAME}`);
+    const created = await guild.channels.create({
+      name: MONITOR_CHANNEL_NAME,
+      type: ChannelType.GuildText,
+      topic: `Logos process monitor — CWD: ${resolve(monitorConfig!.workspaceRoot)}`,
+      reason: "Logos monitor channel auto-created",
+    });
 
-  monitorChannelId = created.id;
-  return created.id;
+    monitorChannelId = created.id;
+    return created.id;
+  } catch (err) {
+    console.warn(`[monitor] Cannot create #${MONITOR_CHANNEL_NAME} — missing permissions, skipping`);
+    return null;
+  }
 }
 
 async function verifyChannel(): Promise<boolean> {
@@ -100,7 +105,7 @@ async function verifyChannel(): Promise<boolean> {
     // channel was deleted or inaccessible
   }
 
-  console.warn("[monitor] Channel gone — recreating");
+  console.warn("[monitor] Channel gone — attempting recreate");
   monitorChannelId = null;
   return !!(await ensureChannel());
 }

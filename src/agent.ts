@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "child_process";
 import { createWriteStream, type WriteStream } from "fs";
-import type { AgentResult, StreamCallback } from "./types.js";
+import type { AgentResult, StreamCallback, ActivityCallback } from "./types.js";
 import { mlog } from "./monitor.js";
 import { getAllValues } from "./vault.js";
 
@@ -26,6 +26,7 @@ export function killAgent(contextKey: string): boolean {
 export interface RunAgentOpts {
   rolloutPath?: string;
   onChunk?: StreamCallback;
+  onActivity?: ActivityCallback;
 }
 
 export async function runAgent(
@@ -37,7 +38,7 @@ export async function runAgent(
   const opts: RunAgentOpts = typeof optsOrChunk === "function"
     ? { onChunk: optsOrChunk }
     : optsOrChunk ?? {};
-  const { rolloutPath, onChunk } = opts;
+  const { rolloutPath, onChunk, onActivity } = opts;
 
   if (running.has(contextKey)) {
     mlog("warn", "agent", `Rejected duplicate run for ${contextKey}`);
@@ -60,27 +61,15 @@ export async function runAgent(
   });
 
   return new Promise<AgentResult>((resolve) => {
-    const openRouterKey = vaultVars.OPENROUTER_KEY || process.env.OPENROUTER_KEY;
-    if (!openRouterKey) throw new Error("OPENROUTER_KEY not found in vault or env");
-
-    const orSettings = JSON.stringify({
-      env: {
-        ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
-        ANTHROPIC_API_KEY: openRouterKey,
-      },
-    });
-
     const proc = spawn(
       "claude",
       [
         "-p",
         "--verbose",
-        "--model", "anthropic/claude-opus-4.6",
-        "--dangerously-skip-permissions",
+        "--permission-mode", "acceptEdits",
+        "--allowed-tools", "Bash,Read,Write,Edit,Glob,Grep,Agent,NotebookEdit,WebFetch,WebSearch",
         "--output-format",
         "stream-json",
-        "--setting-sources", "project",
-        "--settings", orSettings,
       ],
       {
         cwd,
@@ -88,8 +77,6 @@ export async function runAgent(
         env: {
           ...process.env,
           ...vaultVars,
-          ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
-          ANTHROPIC_API_KEY: openRouterKey,
         },
       }
     );
@@ -157,11 +144,30 @@ export async function runAgent(
 
       for (const line of lines) {
         if (!line.trim()) continue;
+
+        if (onActivity) {
+          const activity = extractActivity(line);
+          if (activity !== undefined) onActivity(activity);
+        }
+
+        // Handle incremental deltas (content_block_delta) — append to fullOutput
+        const delta = extractDelta(line);
+        if (delta) {
+          fullOutput += delta;
+          if (onChunk) {
+            if (onActivity) onActivity(null); // clear activity when text streams
+            onChunk(delta, fullOutput);
+          }
+          continue;
+        }
+
+        // Handle full-text snapshots (assistant messages, result)
         const text = extractText(line);
         if (text && text !== fullOutput) {
           const newContent = text.slice(fullOutput.length);
           fullOutput = text;
           if (newContent && onChunk) {
+            if (onActivity) onActivity(null); // clear activity when text streams
             onChunk(newContent, fullOutput);
           }
         }
@@ -204,6 +210,79 @@ export async function runAgent(
   });
 }
 
+// Returns: string = show activity, null = clear activity, undefined = no change
+function extractActivity(line: string): string | null | undefined {
+  try {
+    const obj = JSON.parse(line);
+
+    // Tool use: agent is calling a tool
+    if (obj.type === "assistant" && obj.message?.content) {
+      const content = Array.isArray(obj.message.content) ? obj.message.content : [];
+      for (const block of content) {
+        if (block.type === "tool_use") {
+          const name = block.name ?? "unknown";
+          const input = block.input ?? {};
+          switch (name) {
+            case "Bash":
+              return `\u2699\ufe0f Running: \`${truncate(input.command ?? "", 80)}\``;
+            case "Read":
+              return `\ud83d\udcc4 Reading: \`${truncate(input.file_path ?? "", 80)}\``;
+            case "Write":
+              return `\u270f\ufe0f Writing: \`${truncate(input.file_path ?? "", 80)}\``;
+            case "Edit":
+              return `\u270f\ufe0f Editing: \`${truncate(input.file_path ?? "", 80)}\``;
+            case "Glob":
+              return `\ud83d\udd0d Searching files: \`${truncate(input.pattern ?? "", 80)}\``;
+            case "Grep":
+              return `\ud83d\udd0d Searching for: \`${truncate(input.pattern ?? "", 80)}\``;
+            case "WebFetch":
+              return `\ud83c\udf10 Fetching: \`${truncate(input.url ?? "", 80)}\``;
+            case "WebSearch":
+              return `\ud83c\udf10 Searching: \`${truncate(input.query ?? "", 80)}\``;
+            case "Agent":
+              return `\ud83e\udd16 Spawning sub-agent: ${truncate(input.description ?? "", 80)}`;
+            default:
+              return `\ud83d\udd27 Using: ${name}`;
+          }
+        }
+      }
+    }
+
+    // Tool result returned — agent is thinking again
+    if (obj.type === "user" && obj.message?.content) {
+      const content = Array.isArray(obj.message.content) ? obj.message.content : [];
+      for (const block of content) {
+        if (block.type === "tool_result") {
+          return "\ud83d\udcad Thinking\u2026";
+        }
+      }
+    }
+
+    return undefined; // no change
+  } catch {
+    return undefined;
+  }
+}
+
+function truncate(s: string, max: number): string {
+  s = s.replace(/\n/g, " ");
+  return s.length <= max ? s : s.slice(0, max) + "…";
+}
+
+/** Extract incremental text delta from content_block_delta events */
+function extractDelta(line: string): string | null {
+  try {
+    const obj = JSON.parse(line);
+    if (obj.type === "content_block_delta" && obj.delta?.text) {
+      return obj.delta.text;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Extract full accumulated text from assistant messages or final result */
 function extractText(line: string): string | null {
   try {
     const obj = JSON.parse(line);
@@ -221,10 +300,6 @@ function extractText(line: string): string | null {
           .map((b: any) => b.text)
           .join("");
       }
-    }
-
-    if (obj.type === "content_block_delta" && obj.delta?.text) {
-      return obj.delta.text;
     }
 
     return null;

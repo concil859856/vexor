@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 
-const VAULT_DIR = join(homedir(), ".arbos");
+const VAULT_DIR = join(homedir(), ".logos");
 const VAULT_PATH = join(VAULT_DIR, "vault.enc");
 const ALGORITHM = "aes-256-gcm";
 const IV_LEN = 16;
@@ -19,7 +19,7 @@ export interface VaultEntry {
 export type VaultData = Record<string, VaultEntry>;
 
 function deriveKey(passphrase: string): Buffer {
-  return scryptSync(passphrase, "arbos-vault-salt", 32);
+  return scryptSync(passphrase, "logos-vault-salt", 32);
 }
 
 function getVaultKey(): Buffer {

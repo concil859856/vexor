@@ -22,14 +22,18 @@ async function loadConfig(): Promise<Config> {
 
   const discordToken = get("DISCORD_TOKEN");
   const guildId = get("GUILD_ID");
-  const openRouterKey = get("OPENROUTER_KEY");
   const workspaceRoot = resolve(process.env.WORKSPACE_ROOT ?? "./workspace");
 
   if (!discordToken) throw new Error("DISCORD_TOKEN is required (set in vault or env)");
   if (!guildId) throw new Error("GUILD_ID is required (set in vault or env)");
-  if (!openRouterKey) throw new Error("OPENROUTER_KEY is required (set in vault or env)");
 
-  return { discordToken, guildId, openRouterKey, workspaceRoot, vaultKey };
+  // Comma-separated channel IDs for external servers: EXTERNAL_CHANNELS=id1,id2,id3
+  const extRaw = get("EXTERNAL_CHANNELS") ?? "";
+  const externalChannels = new Set(
+    extRaw.split(",").map((s) => s.trim()).filter(Boolean)
+  );
+
+  return { discordToken, guildId, workspaceRoot, vaultKey, externalChannels };
 }
 
 // ── Boot ────────────────────────────────────────────────────────────────────
@@ -57,7 +61,7 @@ async function main() {
   await client.login(config.discordToken);
 
   const shutdown = async () => {
-    mlog("warn", "arbos", "Shutting down…");
+    mlog("warn", "logos", "Shutting down…");
 
     const loops = getActiveLoops();
     for (const [, loop] of loops) {
@@ -86,7 +90,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  mlog("error", "arbos", `Fatal: ${err instanceof Error ? err.message : String(err)}`);
-  console.error("[arbos] Fatal:", err);
+  mlog("error", "logos", `Fatal: ${err instanceof Error ? err.message : String(err)}`);
+  console.error("[logos] Fatal:", err);
   process.exit(1);
 });

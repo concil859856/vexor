@@ -41,6 +41,15 @@ import {
 import { buildChannelPrompt, buildThreadChatPrompt } from "./prompt.js";
 import { runAgent, isAgentRunning } from "./agent.js";
 import {
+  stripSpeakPrefix,
+  checkSpeechFriendly,
+  generateSpeech,
+  cleanupSpeechFile,
+  detectVoiceEndpoint,
+  isSpeechBusy,
+  setSpeechBusy,
+} from "./speech.js";
+import {
   startLoop,
   pauseLoop,
   stopLoop,
@@ -55,12 +64,26 @@ import { initMonitor, mlog, MONITOR_CHANNEL_NAME } from "./monitor.js";
 import { resolve, join } from "path";
 import { readFile, readdir, rm, stat } from "fs/promises";
 
+const OWNER_ID = "1471668391646597325"; // Space
+
+// ── Per-channel/thread message serialization ────────────────────────────────
+// Ensures messages in the same channel/thread are processed one at a time so
+// their chat-history appends, prompt reads, and agent replies never interleave.
+const channelLocks = new Map<string, Promise<void>>();
+
+function serializeByChannel<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = channelLocks.get(key) ?? Promise.resolve();
+  const current = prev.then(fn, fn);
+  channelLocks.set(key, current.then(() => {}, () => {}));
+  return current;
+}
+
 // ── Slash Command Definitions ───────────────────────────────────────────────
 
 const commands = [
   new SlashCommandBuilder()
     .setName("status")
-    .setDescription("Show Arbos status and active loops"),
+    .setDescription("Show Logos status and active loops"),
 
   new SlashCommandBuilder()
     .setName("pin")
@@ -161,7 +184,24 @@ export async function registerCommands(config: Config, clientId: string) {
 // ── Event Wiring ────────────────────────────────────────────────────────────
 
 export function wireEvents(client: Client, config: Config, queue: DiscordSendQueue) {
-  client.on(Events.MessageCreate, (msg) => handleMessage(msg, config, queue));
+  client.on(Events.MessageCreate, (msg) => {
+    // Serialize per channel/thread so two fast-arriving messages never
+    // interleave their chat-history appends, prompt reads, or replies.
+    const lockKey = msg.channel.id;
+    serializeByChannel(lockKey, () => handleMessage(msg, config, queue)).catch((err) => {
+      mlog("error", "bot", `Unhandled error in handleMessage`, {
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+        channel: msg.channel.id,
+        author: msg.author?.username,
+      });
+      // Best-effort: tell the user something went wrong
+      const ch = msg.channel;
+      if (ch.isTextBased()) {
+        (ch as TextChannel).send(`_Something went wrong processing your message. Error: ${err instanceof Error ? err.message : String(err)}_`).catch(() => {});
+      }
+    });
+  });
   client.on(Events.ChannelCreate, (ch) => handleChannelCreate(ch as any, config, queue));
   client.on(Events.ChannelDelete, (ch) => handleChannelDelete(ch as any, config));
   client.on(Events.ThreadCreate, (thread, newlyCreated) =>
@@ -170,7 +210,6 @@ export function wireEvents(client: Client, config: Config, queue: DiscordSendQue
   client.on(Events.ThreadDelete, (thread) => handleThreadDelete(thread as any, config));
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
-    if (interaction.guildId !== config.guildId) return;
     await handleCommand(interaction, config, queue);
   });
 }
@@ -349,12 +388,20 @@ async function assertRootChannel(guild: import("discord.js").Guild, config: Conf
   }
 
   if (!rootChannel) {
-    mlog("info", "bot", `Root channel not found — creating #root`);
-    rootChannel = await guild.channels.create({
-      name: "root",
-      type: ChannelType.GuildText,
-      reason: "Arbos root channel",
-    });
+    try {
+      mlog("info", "bot", `Root channel not found — creating #root`);
+      rootChannel = await guild.channels.create({
+        name: "root",
+        type: ChannelType.GuildText,
+        reason: "Logos root channel",
+      });
+    } catch (err) {
+      mlog("warn", "bot", `Cannot create #root — missing permissions, skipping`, {
+        guild: guild.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
   }
 
   const pins = await rootChannel.messages.fetchPinned();
@@ -388,7 +435,27 @@ async function assertRootChannel(guild: import("discord.js").Guild, config: Conf
 async function handleMessage(msg: Message, config: Config, queue: DiscordSendQueue) {
   if (msg.author.bot) return;
   if (msg.system) return;
-  if (!msg.guild || msg.guild.id !== config.guildId) return;
+  if (!msg.guild) return;
+
+  // Primary guild = all channels. Other guilds = only whitelisted channel IDs.
+  const isPrimaryGuild = msg.guild.id === config.guildId;
+  const channelId = msg.channel.isThread()
+    ? (msg.channel as ThreadChannel).parentId ?? msg.channel.id
+    : msg.channel.id;
+
+  if (!isPrimaryGuild) {
+    mlog("info", "message", `External guild message received`, {
+      guildId: msg.guild.id,
+      channelId,
+      rawChannelId: msg.channel.id,
+      whitelisted: config.externalChannels.has(channelId),
+      whitelist: Array.from(config.externalChannels),
+      author: msg.author.username,
+      contentPreview: msg.content.slice(0, 60),
+    });
+  }
+
+  if (!isPrimaryGuild && !config.externalChannels.has(channelId)) return;
 
   const channel = msg.channel;
   if (!channel.isTextBased()) return;
@@ -398,6 +465,21 @@ async function handleMessage(msg: Message, config: Config, queue: DiscordSendQue
     ? ((channel as ThreadChannel).parent as TextChannel)?.name ?? "root"
     : (channel as TextChannel).name;
   const threadName = isInThread ? (channel as ThreadChannel).name : undefined;
+
+  // ── Only respond when mentioned or replied to (threads exempt — they're dedicated bot loops) ──
+  if (!isInThread) {
+    const botId = msg.client.user?.id;
+    const isMentioned = botId ? msg.mentions.has(botId) : false;
+    const isReplyToBot =
+      msg.reference?.messageId
+        ? await msg.channel.messages
+            .fetch(msg.reference.messageId)
+            .then((ref) => ref.author.id === botId)
+            .catch(() => false)
+        : false;
+
+    if (!isMentioned && !isReplyToBot) return;
+  }
 
   mlog("info", "message", `Incoming message`, {
     author: msg.author.displayName ?? msg.author.username,
@@ -414,6 +496,8 @@ async function handleMessage(msg: Message, config: Config, queue: DiscordSendQue
     return;
   }
 
+  const { isSpeak, text: messageText, endpoint: speakEndpoint } = stripSpeakPrefix(msg.content);
+
   const ctx = await resolveContext(config, channelName, threadName);
 
   const entry: ChatEntry = {
@@ -424,27 +508,174 @@ async function handleMessage(msg: Message, config: Config, queue: DiscordSendQue
   };
   await appendChat(ctx.chatDir, entry);
 
-  const prompt = isInThread
+  let prompt = isInThread
     ? await buildThreadChatPrompt(config, ctx)
     : await buildChannelPrompt(config, ctx);
 
-  const contextKey = channel.id;
-  if (isAgentRunning(contextKey)) {
-    mlog("warn", "message", `Rejected — agent already running`, {
-      channel: channelName,
-      thread: threadName ?? null,
-    });
-    await queue.send(channel.id, "_Already working on a previous message…_");
-    return;
+  if (isSpeak) {
+    prompt += [
+      ``,
+      ``,
+      `## 🎙️ SPEECH MODE — STRICT WORD LIMIT`,
+      `The user used /speak — your response will be converted to audio.`,
+      `You MUST keep your entire response UNDER 80 words. This is non-negotiable.`,
+      `Be concise, conversational, and direct. No bullet points, no code blocks, no markdown formatting.`,
+      `Write as if you're speaking out loud — natural, flowing sentences.`,
+      `Skip greetings and filler. Get straight to the point.`,
+      `If the topic is complex, give the essential answer only — don't try to cover everything.`,
+    ].join("\n");
   }
 
-  const stream = await queue.createStream(channel.id);
+  const contextKey = msg.id;
 
-  const result = await runAgent(contextKey, prompt, ctx.cwd, (chunk) => {
-    stream.push(chunk);
-  });
+  const isOwner = msg.author.id === OWNER_ID;
+  let result: Awaited<ReturnType<typeof runAgent>>;
 
-  await stream.finalize(result.output);
+  if (isOwner) {
+    // ── Owner (Space): full streaming logs ──
+    let stream: Awaited<ReturnType<typeof queue.createStream>> | null = null;
+    try {
+      stream = await queue.createStream(channel.id, msg.id);
+    } catch (err) {
+      mlog("error", "stream", `createStream failed`, { error: err instanceof Error ? err.message : String(err) });
+    }
+
+    try {
+      result = await runAgent(contextKey, prompt, ctx.cwd, {
+        onChunk: (chunk) => {
+          stream?.push(chunk);
+        },
+        onActivity: (activity) => {
+          stream?.setActivity(activity);
+        },
+      });
+    } catch (err) {
+      mlog("error", "agent", `runAgent threw`, { error: err instanceof Error ? err.message : String(err) });
+      result = {
+        output: `_Agent crashed: ${err instanceof Error ? err.message : String(err)}_`,
+        stderr: "",
+        exitCode: 1,
+        durationMs: 0,
+        promptLength: prompt.length,
+      };
+    }
+
+    // Always finalize — never leave the user staring at "Thinking…"
+    try {
+      if (stream) {
+        await stream.finalize(result.output);
+      } else {
+        // Stream creation failed — send result as a plain message
+        await queue.send(channel.id, result.output || "_No output._", msg.id);
+      }
+    } catch (err) {
+      mlog("error", "stream", `finalize failed — sending plain fallback`, { error: err instanceof Error ? err.message : String(err) });
+      try {
+        await queue.send(channel.id, result.output || "_No output._");
+      } catch {
+        mlog("error", "stream", `Even plain fallback send failed`);
+      }
+    }
+
+    // ── /speak: generate voice message if response is speech-friendly ────
+    mlog("info", "speech", `Speech check`, { isSpeak, hasOutput: !!result.output, outputLength: result.output?.length ?? 0 });
+    if (isSpeak && result.output) {
+      if (isSpeechBusy()) {
+        await queue.send(channel.id, "_Sorry, I can't process this as speech — a previous voice message is still generating. Here's the text instead._");
+      } else {
+        const speechCheck = checkSpeechFriendly(result.output);
+        mlog("info", "speech", `Speech friendly check result`, { ok: speechCheck.ok, reason: speechCheck.reason });
+        if (speechCheck.ok) {
+          try {
+            setSpeechBusy(true);
+            const voiceEndpoint = speakEndpoint ?? detectVoiceEndpoint(result.output);
+            mlog("info", "speech", `Using voice endpoint: ${voiceEndpoint}`);
+            const oggPath = await generateSpeech(result.output, ctx.cwd, voiceEndpoint);
+            if (oggPath) {
+              await queue.sendVoiceMessage(channel.id, oggPath, msg.id);
+              await cleanupSpeechFile(oggPath);
+              mlog("info", "speech", `Voice message sent successfully`);
+            } else {
+              await queue.send(channel.id, "_Speech generation failed — response sent as text above._");
+            }
+          } catch (err) {
+            mlog("error", "speech", `Voice message send failed`, {
+              error: err instanceof Error ? err.message : String(err),
+            });
+            await queue.send(channel.id, "_Failed to send voice message — response sent as text above._");
+          } finally {
+            setSpeechBusy(false);
+          }
+        } else {
+          await queue.send(
+            channel.id,
+            `_You asked for speech, but I'm skipping it: ${speechCheck.reason}_`
+          );
+        }
+      }
+    }
+  } else {
+    // ── Non-owner users: reaction-based status system ──
+    // 👀 = seen
+    let eyesReaction: any;
+    try { eyesReaction = await msg.react("👀"); mlog("info", "reaction", "👀 added"); } catch (e) { mlog("error", "reaction", "👀 failed", { error: (e as Error).message }); }
+
+    // 🙌 = processing — replace 👀 with 🙌
+    try { if (eyesReaction) await eyesReaction.users.remove(msg.client.user!.id); } catch (e) { mlog("error", "reaction", "👀 remove failed", { error: (e as Error).message }); }
+    let handsReaction: any;
+    try { handsReaction = await msg.react("🙌"); mlog("info", "reaction", "🙌 added"); } catch (e) { mlog("error", "reaction", "🙌 failed", { error: (e as Error).message }); }
+
+    result = await runAgent(contextKey, prompt, ctx.cwd, {});
+
+    // Remove processing reaction
+    try { if (handsReaction) await handsReaction.users.remove(msg.client.user!.id); } catch (e) { mlog("error", "reaction", "🙌 remove failed", { error: (e as Error).message }); }
+
+    // Send final response as a single message (no streaming edits)
+    if (result.output) {
+      await queue.send(channel.id, result.output, msg.id);
+    } else {
+      await queue.send(channel.id, "_No output._", msg.id);
+    }
+
+    // 🥩 = done
+    try { await msg.react("🥩"); mlog("info", "reaction", "🥩 added"); } catch (e) { mlog("error", "reaction", "🥩 failed", { error: (e as Error).message }); }
+
+    // ── /speak: generate voice message for non-owner too ────
+    if (isSpeak && result.output) {
+      if (isSpeechBusy()) {
+        await queue.send(channel.id, "_Sorry, I can't process this as speech — a previous voice message is still generating. Here's the text instead._");
+      } else {
+        const speechCheck = checkSpeechFriendly(result.output);
+        mlog("info", "speech", `Non-owner speech check`, { ok: speechCheck.ok, reason: speechCheck.reason });
+        if (speechCheck.ok) {
+          try {
+            setSpeechBusy(true);
+            const voiceEndpoint = speakEndpoint ?? detectVoiceEndpoint(result.output);
+            const oggPath = await generateSpeech(result.output, ctx.cwd, voiceEndpoint);
+            if (oggPath) {
+              await queue.sendVoiceMessage(channel.id, oggPath, msg.id);
+              await cleanupSpeechFile(oggPath);
+              mlog("info", "speech", `Voice message sent for non-owner`);
+            } else {
+              await queue.send(channel.id, "_Speech generation failed — response sent as text above._");
+            }
+          } catch (err) {
+            mlog("error", "speech", `Voice message send failed (non-owner)`, {
+              error: err instanceof Error ? err.message : String(err),
+            });
+            await queue.send(channel.id, "_Failed to send voice message — response sent as text above._");
+          } finally {
+            setSpeechBusy(false);
+          }
+        } else {
+          await queue.send(
+            channel.id,
+            `_You asked for speech, but I'm skipping it: ${speechCheck.reason}_`
+          );
+        }
+      }
+    }
+  }
 
   await appendChat(ctx.chatDir, {
     ts: new Date().toISOString(),
@@ -453,7 +684,7 @@ async function handleMessage(msg: Message, config: Config, queue: DiscordSendQue
   });
 
   if (await shouldRegenSummary(ctx.chatDir)) {
-    regenerateSummary(ctx.chatDir, config.openRouterKey);
+    regenerateSummary(ctx.chatDir);
   }
 }
 
@@ -518,7 +749,6 @@ async function handleChannelCreate(
   config: Config,
   queue: DiscordSendQueue
 ) {
-  if (channel.guild?.id !== config.guildId) return;
   if (channel.type !== ChannelType.GuildText) return;
   if (channel.name === MONITOR_CHANNEL_NAME) return;
 
@@ -555,7 +785,6 @@ async function handleThreadCreate(
   config: Config
 ) {
   if (!newlyCreated) return;
-  if (thread.guild?.id !== config.guildId) return;
 
   const parentChannel = thread.parent as TextChannel | null;
   if (!parentChannel) return;
@@ -578,7 +807,6 @@ async function handleThreadCreate(
 // ── Channel / Thread Delete Handlers ────────────────────────────────────────
 
 async function handleChannelDelete(channel: TextChannel, config: Config) {
-  if (channel.guild?.id !== config.guildId) return;
   if (channel.type !== ChannelType.GuildText) return;
 
   const channelName = channel.name;
@@ -599,7 +827,6 @@ async function handleChannelDelete(channel: TextChannel, config: Config) {
 }
 
 async function handleThreadDelete(thread: ThreadChannel, config: Config) {
-  if (thread.guild?.id !== config.guildId) return;
 
   const threadName = thread.name;
   const parentChannel = thread.parent as TextChannel | null;

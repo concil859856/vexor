@@ -5,9 +5,10 @@ import type { TextChannel, ThreadChannel, Message } from "discord.js";
 export interface Config {
   discordToken: string;
   guildId: string;
-  openRouterKey: string;
   workspaceRoot: string;
   vaultKey: string;
+  /** Channel IDs on external servers the bot is allowed to respond in */
+  externalChannels: Set<string>;
 }
 
 // ── Chat Memory ─────────────────────────────────────────────────────────────
@@ -30,6 +31,7 @@ export interface AgentResult {
 }
 
 export type StreamCallback = (chunk: string, full: string) => void;
+export type ActivityCallback = (activity: string | null) => void;
 
 // ── RALPH Loop ──────────────────────────────────────────────────────────────
 

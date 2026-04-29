@@ -1,5 +1,5 @@
 {
-  "name": "arbos",
+  "name": "logos",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && pm2 start ecosystem.config.cjs && tsc --watch",
-    "deploy": "tsc && pm2 restart arbos"
+    "deploy": "tsc && pm2 restart logos"
   },
   "dependencies": {
     "discord.js": "^14.18.0",

@@ -3,8 +3,13 @@ import {
   TextChannel,
   ThreadChannel,
   Message,
+  MessageFlags,
+  AttachmentBuilder,
   DiscordAPIError,
+  Routes,
 } from "discord.js";
+import { readFile } from "fs/promises";
+import { getVoiceMetadata } from "./speech.js";
 
 const MAX_MSG_LEN = 2000;
 const SAFE_MSG_LEN = 1900;
@@ -39,12 +44,55 @@ export class DiscordSendQueue {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
-  async send(channelId: string, content: string): Promise<Message> {
+  async sendVoiceMessage(channelId: string, filePath: string, replyTo?: string): Promise<Message> {
+    const meta = await getVoiceMetadata(filePath);
+    const fileData = await readFile(filePath);
+
+    return this.enqueue(channelId, async () => {
+      const body: Record<string, any> = {
+        flags: MessageFlags.IsVoiceMessage,
+        attachments: [{
+          id: "0",
+          filename: "voice-message.ogg",
+          duration_secs: meta.durationSecs,
+          waveform: meta.waveform,
+        }],
+      };
+      if (replyTo) {
+        body.message_reference = { message_id: replyTo };
+      }
+
+      const result = await this.client.rest.post(
+        Routes.channelMessages(channelId),
+        {
+          body,
+          files: [{
+            name: "voice-message.ogg",
+            data: fileData,
+            contentType: "audio/ogg; codecs=opus",
+          }],
+        }
+      ) as any;
+
+      const channel = await this.resolveChannel(channelId);
+      return channel.messages.fetch(result.id);
+    });
+  }
+
+  async send(channelId: string, content: string, replyTo?: string): Promise<Message> {
     const channel = await this.resolveChannel(channelId);
     const chunks = splitMessage(content);
     let lastMsg!: Message;
-    for (const chunk of chunks) {
-      lastMsg = await this.enqueue(channelId, () => channel.send(chunk));
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      // Only reply-reference the first chunk
+      if (i === 0 && replyTo) {
+        lastMsg = await this.enqueue(channelId, () =>
+          channel.send({ content: chunk, reply: { messageReference: replyTo } })
+        );
+      } else {
+        lastMsg = await this.enqueue(channelId, () => channel.send(chunk));
+      }
     }
     return lastMsg;
   }
@@ -62,8 +110,8 @@ export class DiscordSendQueue {
    * Creates a streaming session: sends a placeholder, then returns helpers
    * to push chunks and finalize.
    */
-  async createStream(channelId: string): Promise<StreamHandle> {
-    const placeholder = await this.send(channelId, "_Arbos is thinking…_");
+  async createStream(channelId: string, replyTo?: string): Promise<StreamHandle> {
+    const placeholder = await this.send(channelId, "_Logos is thinking…_", replyTo);
     return new StreamHandle(this, channelId, placeholder);
   }
 
@@ -147,11 +195,25 @@ export class StreamHandle {
   private lastFlush = Date.now();
   private editFailed = false;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private activity: string | null = null;
 
   constructor(queue: DiscordSendQueue, channelId: string, placeholder: Message) {
     this.queue = queue;
     this.channelId = channelId;
     this.messages = [placeholder];
+  }
+
+  setActivity(activity: string | null) {
+    const prev = this.activity;
+    this.activity = activity;
+
+    // If no text output yet, show activity as the message content
+    if (!this.buffer && activity) {
+      this.editLatest(`_${activity}_`);
+    } else if (this.buffer && activity && activity !== prev) {
+      // Re-flush with new activity footer
+      this.flush();
+    }
   }
 
   push(chunk: string) {
@@ -168,6 +230,14 @@ export class StreamHandle {
 
   private lastFlushedLength: number = 0;
 
+  private withActivity(content: string): string {
+    if (!this.activity) return content;
+    const footer = `\n\n> _${this.activity}_`;
+    const maxContent = SAFE_MSG_LEN - footer.length;
+    if (content.length > maxContent) return content;
+    return content + footer;
+  }
+
   private flush() {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
@@ -182,7 +252,7 @@ export class StreamHandle {
     if (content.length > SAFE_MSG_LEN) {
       this.splitAndContinue(content);
     } else {
-      this.editLatest(content);
+      this.editLatest(this.withActivity(content));
     }
   }
 
@@ -250,17 +320,44 @@ export class StreamHandle {
 
 function splitMessage(text: string): string[] {
   if (text.length <= MAX_MSG_LEN) return [text];
+
   const chunks: string[] = [];
   let remaining = text;
+
   while (remaining.length > 0) {
     if (remaining.length <= MAX_MSG_LEN) {
       chunks.push(remaining);
       break;
     }
+
     let splitAt = remaining.lastIndexOf("\n", SAFE_MSG_LEN);
     if (splitAt < SAFE_MSG_LEN / 2) splitAt = SAFE_MSG_LEN;
-    chunks.push(remaining.slice(0, splitAt));
+
+    let chunk = remaining.slice(0, splitAt);
     remaining = remaining.slice(splitAt);
+
+    // Check if we're splitting inside an open code block
+    const fencePattern = /^(`{3,})\w*/gm;
+    let openFence: string | null = null;
+    let match: RegExpExecArray | null;
+    while ((match = fencePattern.exec(chunk)) !== null) {
+      const ticks = match[1];
+      if (openFence) {
+        // This fence closes the block (matching or longer backtick run)
+        if (ticks.length >= openFence.length) openFence = null;
+      } else {
+        openFence = ticks;
+      }
+    }
+
+    if (openFence) {
+      // Close the dangling code block at end of this chunk
+      chunk += "\n" + openFence;
+      // Re-open it at the start of the next chunk
+      remaining = openFence + "\n" + remaining;
+    }
+
+    chunks.push(chunk);
   }
   return chunks;
 }

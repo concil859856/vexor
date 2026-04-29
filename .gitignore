@@ -4,3 +4,4 @@ workspace/
 .env
 logs/
 tsc-watch.log
+vocence/

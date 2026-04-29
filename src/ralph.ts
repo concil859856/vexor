@@ -354,6 +354,7 @@ async function executeStep(
   const result = await runAgent(threadId, prompt, ctx.cwd, {
     rolloutPath,
     onChunk(chunk) { stream.push(chunk); },
+    onActivity(activity) { stream.setActivity(activity); },
   });
 
   await stream.finalize(result.output);
@@ -380,7 +381,7 @@ async function executeStep(
   });
 
   if (await shouldRegenSummary(ctx.chatDir)) {
-    regenerateSummary(ctx.chatDir, config.openRouterKey);
+    regenerateSummary(ctx.chatDir);
   }
 }
 

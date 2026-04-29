@@ -1,6 +1,6 @@
 module.exports = {
   apps: [{
-    name: "arbos",
+    name: "logos",
     script: "dist/index.js",
     cwd: __dirname,
     node_args: "--env-file=.env",
@@ -11,8 +11,8 @@ module.exports = {
     watch_delay: 1000,
     ignore_watch: ["node_modules", "logs", "workspace"],
     log_date_format: "YYYY-MM-DD HH:mm:ss.SSS",
-    error_file: "logs/arbos-error.log",
-    out_file: "logs/arbos-out.log",
+    error_file: "logs/logos-error.log",
+    out_file: "logs/logos-out.log",
     merge_logs: true,
     max_memory_restart: "512M",
   }]

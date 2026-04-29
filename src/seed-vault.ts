@@ -10,3 +10,4 @@ for (const arg of process.argv.slice(2)) {
   const value = arg.slice(eq + 1);
   await setVar(key, value, "Bootstrap credential", "run.sh");
 }
+
