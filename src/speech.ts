@@ -11,7 +11,7 @@ let _speechBusy = false;
 export function isSpeechBusy(): boolean { return _speechBusy; }
 export function setSpeechBusy(v: boolean): void { _speechBusy = v; }
 
-const TTS_BASE_URL = "http://149.36.0.184:8088";
+const TTS_BASE_URL = "http://47.186.29.91:53211";
 const TTS_TOKEN = "logos_bot_token";
 const TTS_TIMEOUT_MS = 50_000; // 50 seconds overall timeout
 const TTS_CONNECT_TIMEOUT_MS = 50_000;
@@ -97,10 +97,9 @@ export async function generateSpeech(text: string, outputDir: string, endpoint: 
   }
 
   const url = `${TTS_BASE_URL}/${endpoint}`;
-  const params = new URLSearchParams({
-    text: sanitized,
-    output_format: "ogg",
-  });
+  const formData = new FormData();
+  formData.append("text", sanitized);
+  formData.append("output_format", "ogg");
 
   mlog("info", "speech", "Calling TTS endpoint", {
     textLength: sanitized.length,
@@ -115,9 +114,8 @@ export async function generateSpeech(text: string, outputDir: string, endpoint: 
       method: "POST",
       headers: {
         "X-Token": TTS_TOKEN,
-        "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: params.toString(),
+      body: formData,
       signal: controller.signal,
     });
 

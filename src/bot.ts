@@ -560,6 +560,11 @@ async function handleMessage(msg: Message, config: Config, queue: DiscordSendQue
       };
     }
 
+    // Strip internal tags like {{VOICE:...}} that shouldn't leak to Discord
+    if (result.output) {
+      result.output = result.output.replace(/\{\{VOICE:[^}]*\}\}/g, "").trimEnd();
+    }
+
     // Always finalize — never leave the user staring at "Thinking…"
     try {
       if (stream) {
