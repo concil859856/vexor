@@ -31,7 +31,7 @@ A detailed technical reference for the **Vocence** voice intelligence subnet on 
 **Vocence** is a **Bittensor subnet** (Subnet 78) focused on **voice intelligence**: development and evaluation of models for Prompt-based Text-to-Speech (PromptTTS), Speech-to-Text (STT), Speech-to-Speech (STS), voice cloning, and related multimodal voice tasks.
 
 - **Current focus (Q1):** **PromptTTS** — miners deploy models that generate speech from **text + natural-language voice instructions** (e.g. “A calm middle-aged male voice with a warm tone, speaking slowly…”). Validators score them on content correctness, audio quality, and prompt adherence.
-- **Incentive model:** Decentralized marketplace: miners compete on measurable performance; validators run a shared evaluation pipeline and set weights on chain; rewards follow a **winner-take-all** rule with a **”beat predecessors by threshold”** condition (see [§4](#4-scoring-and-winner-selection)). Additionally, each hotkey is limited to a maximum of **2** valid on-chain commits after block 8,081,000 — exceeding this cap marks the miner invalid.
+- **Incentive model:** Decentralized marketplace: miners compete on measurable performance; validators run a shared evaluation pipeline and set weights on chain; rewards follow a **winner-take-all** rule with a **”beat predecessors by threshold”** condition (see [§4](#4-scoring-and-winner-selection)). Additionally, each hotkey is limited to a maximum of **2** valid on-chain commits after block **8,270,310** — exceeding this cap marks the miner invalid.
 
 ### Why Bittensor?
 
@@ -215,7 +215,7 @@ Code reference: [coordinator.py](https://github.com/vocence-78/vocence/blob/mast
 | `MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING` | 3 | If fewer active validators are usable, cycle burns (v0.1.2+) |
 | `ACTIVE_VALIDATOR_WINDOW_HOURS` | 24 | Recent-submission window for "active validator" status (v0.1.2+) |
 | `THRESHOLD_MARGIN` | 0.02 | Must beat each earlier eligible miner's `global_win_rate` by this margin |
-| `COMMIT_LOCK_BLOCK` | 8081000 | Block after which per-hotkey commit cap is enforced |
+| `COMMIT_LOCK_BLOCK` | 8270310 | Block after which per-hotkey commit cap is enforced |
 | `MAX_POST_CUTOVER_COMMITS` | 2 | Max valid on-chain commits per hotkey after `COMMIT_LOCK_BLOCK`; exceeding = invalid |
 | `MAX_EVALS_FOR_SCORING` | 50 | Use only the most recent N evals per bucket for scoring |
 | `PASS_THRESHOLD` | 0.9 | Per-eval continuous score ≥ this = binary "win" (v0.1.2+); code constant in [evaluation.py](https://github.com/vocence-78/vocence/blob/master/vocence/pipeline/evaluation.py) |
@@ -224,7 +224,7 @@ Code reference: [coordinator.py](https://github.com/vocence-78/vocence/blob/mast
 | `MAX_PARALLEL_EVALS` | 4 | Concurrent OpenAI judge calls per round |
 | `BURN_UID` | 0 | UID for burning when no eligible winner |
 | `BASE_MODEL_COMMIT_BLOCK` | 1000 | Virtual commit block for owner base model |
-| `PARTICIPANT_VALIDATION_INTERVAL` | 1800 | Owner-side miner validation worker interval (seconds) |
+| `PARTICIPANT_VALIDATION_INTERVAL` | 3600 | Owner-side miner validation worker interval (seconds; 1 hour) |
 | `METRICS_CALCULATION_INTERVAL` | 1800 | Owner-side metrics worker interval (seconds) |
 
 ---
@@ -241,15 +241,43 @@ From [miner_sample/MINER_GUIDE.md](https://github.com/vocence-78/vocence/blob/ma
   - `warmup()` — Optional; one short `generate_wav` to avoid first-request timeout.  
   - `generate_wav(instruction: str, text: str) -> tuple[np.ndarray, int]` — Return mono float32 PCM and sample rate.
 
-Only **stdlib and site-packages** may be imported in `miner.py`; no other repo files.
+The locked `miner.py` uses `Qwen3TTSModel.from_pretrained()` to load weights from the local repo snapshot. Only **stdlib and site-packages** may be imported; no other repo files. The script forbids network imports (`requests`, `urllib`, `aiohttp`, `huggingface_hub`, etc.) and dangerous calls (`eval`, `exec`, `__import__`, `snapshot_download`, etc.).
 
 ### Required files in Hugging Face repo
 
-| File | Required | Description |
-|------|----------|-------------|
-| `miner.py` | Yes | PromptTTS engine (class `Miner`, `__init__`, `warmup`, `generate_wav`) |
-| `chute_config.yml` | Yes | Image, NodeSelector (e.g. GPU), Chute scaling (used at Chutes build time) |
-| `vocence_config.yaml` | No | Optional PromptTTS options (sample_rate, limits); read by engine if present |
+Miners must include **exactly** the files listed below. No additional files are allowed — the owner validates the manifest and rejects repos with extra or missing files.
+
+| File | Required | Replaceable | Description |
+|------|----------|-------------|-------------|
+| `miner.py` | Yes | **No (locked)** | Canonical inference script — must be byte-identical to `miner_sample/example_repo/miner.py`. SHA-256 hash enforced. |
+| `model.safetensors` | Yes | Yes | Main model weights (fine-tuned Qwen3 1.7B 12Hz) |
+| `config.json` | Yes | Yes | Model configuration |
+| `generation_config.json` | Yes | Yes | Generation parameters |
+| `merges.txt` | Yes | Yes | Tokenizer merges |
+| `preprocessor_config.json` | Yes | Yes | Preprocessor config |
+| `tokenizer_config.json` | Yes | Yes | Tokenizer config |
+| `vocab.json` | Yes | Yes | Vocabulary |
+| `vocence_config.yaml` | Yes | Yes | Must declare `model_name` matching on-chain commitment. Runtime/generation options. |
+| `chute_config.yml` | Yes | Yes | Image, NodeSelector, Chute config for build |
+| `speech_tokenizer/model.safetensors` | Yes | Yes | Speech tokenizer weights |
+| `speech_tokenizer/config.json` | Yes | Yes | Speech tokenizer config |
+| `speech_tokenizer/configuration.json` | Yes | Yes | Speech tokenizer additional config |
+| `speech_tokenizer/preprocessor_config.json` | Yes | Yes | Speech tokenizer preprocessor config |
+| `.gitattributes` | No | — | Standard git metadata (auto-generated) |
+| `.gitignore` | No | — | Standard git metadata |
+| `README.md` | No | Yes | Optional repo description |
+
+Combined `.safetensors` size must be at least **50 MiB**.
+
+### Locked `miner.py` enforcement
+
+`miner.py` is **locked** — all miners must ship the exact canonical version, byte-for-byte identical. The locked script loads the **Qwen3 1.7B 12Hz voice-design model** from the local repo snapshot and runs inference via `generate_voice_design(text, language, instruct)`. Miners **cannot** add audio pre/post-processing, speaker embeddings, or use alternative models — the inference path is fully determined by the locked script.
+
+Enforcement: SHA-256 hash check both owner-side at registration (`source_audit.py`) and at chute startup by the canonical wrapper. Failure reason: `miner_py_hash_mismatch`.
+
+### `vocence_config.yaml` must declare `model_name`
+
+The file must contain a top-level `model_name` field whose value equals what's committed on chain. If missing, malformed, or mismatched, the chute refuses to start and the owner marks the miner invalid (`vocence_config_missing` / `model_name_mismatch`).
 
 ### Approved template variables (only these)
 
@@ -270,10 +298,32 @@ Owner fetches deploy script from Chutes (`GET /chutes/code/{chute_id}`), masks t
 
 ### Miner flow summary
 
-1. Create HF repo with `miner.py`, `chute_config.yml`, optional `vocence_config.yaml`.  
+1. Create HF repo with the canonical locked `miner.py` (copy from `miner_sample/example_repo/miner.py`), fine-tuned model weights, all required config/tokenizer files, `vocence_config.yaml` (declaring `model_name`), and `chute_config.yml`. No extra files allowed.
 2. Render canonical template with the four variables; build and deploy Chute (`chutes build`, `chutes deploy`).  
 3. Commit on chain: `vocence miner commit --model-name <repo> --model-revision <sha> --chute-id <chute_uuid>`.  
    - The **chute_id** on chain is the Chutes UUID; the **chute name** (used by owner) must contain `vocence`.
+   - `model_revision` **must** be a 40-char hex commit SHA — branch names/tags are rejected.
+
+### Owner validation checks (1-hour cycle)
+
+Each new `(model, revision)` is audited once when first seen; results are cached. The owner runs these checks:
+
+| # | Check | Failure reason |
+|---|-------|----------------|
+| 1 | Chute exists in Chutes API | `chute_fetch_failed` |
+| 2 | Chute name contains `vocence` | `chute_name_missing_vocence` |
+| 3 | Wrapper integrity (deploy script hash matches canonical, masking 4 approved vars) | `wrapper_hash_mismatch` |
+| 4 | Chute is hot | `chute_not_running` |
+| 5 | `VOCENCE_REVISION` is a 40-char hex SHA | `wrapper_revision_not_sha` |
+| 6 | Wrapper repo/revision match on-chain commitment | `repo_mismatch` / `revision_mismatch` |
+| 7 | Repo contains `.safetensors` files | `safetensors_missing` |
+| 8 | Combined `.safetensors` ≥ 50 MiB | `safetensors_below_min_size` |
+| 9 | File manifest: only allowed files, all required present | `extra_files` / `missing_required_files` |
+| 10 | `vocence_config.yaml` exists with correct `model_name` | `vocence_config_missing` / `model_name_mismatch` |
+| 11 | `miner.py` SHA-256 matches canonical locked version | `miner_py_missing` / `miner_py_hash_mismatch` |
+| 12 | Per-tensor fingerprint: no ≥95% match with any existing DB entry | `tensor_clone_of_existing` |
+
+After per-miner checks, two duplicate detection passes run: byte-equality (`model_hash`) and per-tensor fingerprint (≥95% match → earlier commit block wins).
 
 ---
 
@@ -327,7 +377,7 @@ All configuration is loaded from environment (e.g. `.env`); defaults and semanti
 ### Scoring and cycle
 
 - `MIN_EVALS_TO_COMPETE` (40), `THRESHOLD_MARGIN` (0.02), `MAX_EVALS_FOR_SCORING` (50).
-- `COMMIT_LOCK_BLOCK` (8081000) — block after which per-hotkey commit cap applies.  
+- `COMMIT_LOCK_BLOCK` (8270310) — block after which per-hotkey commit cap applies.  
 - `MAX_POST_CUTOVER_COMMITS` (2) — max valid on-chain commits per hotkey after `COMMIT_LOCK_BLOCK`; exceeding this marks the miner invalid.  
 - `MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY` (3), `MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING` (3), `MIN_EVALS_PER_VALIDATOR_FOR_GLOBAL_SCORE` (1).  
 - `ACTIVE_VALIDATOR_WINDOW_HOURS` (24) — recent-submission window for active-validator status.  
@@ -347,7 +397,7 @@ All configuration is loaded from environment (e.g. `.env`); defaults and semanti
 
 ### OpenAI / evaluation
 
-- `OPENAI_AUTH_KEY` / `OPENAI_API_KEY`, `GPT_AUDIO_MODEL` (e.g. `gpt-4o-audio-preview`).
+- `OPENAI_AUTH_KEY` / `OPENAI_API_KEY`, `GPT_AUDIO_MODEL` (`gpt-audio-1.5` — hardcoded, must match across all honest validators).
 
 ### Owner / API
 
@@ -470,13 +520,14 @@ Canonical `/speak` payload: `{"text": "<transcription>", "instruction": "gender:
 
 ## 13. Quick answers (FAQ)
 
-- **How do I become eligible to win rewards?** (v0.1.2+) You need more than **`MIN_EVALS_TO_COMPETE`** (default 40) evaluations in at least **`MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY`** (default 3) distinct active validator buckets, **and** you must beat **every** earlier eligible miner (by commit block), including the base model, by at least **`THRESHOLD_MARGIN`** (default **2%**) on the stake-weighted **global binary win rate** (a "win" = per-eval continuous score ≥ `PASS_THRESHOLD` 0.9). Additionally, each hotkey is limited to **2** valid on-chain commits after block 8,081,000 — exceeding this cap marks you invalid.
+- **How do I become eligible to win rewards?** (v0.1.2+) You need more than **`MIN_EVALS_TO_COMPETE`** (default 40) evaluations in at least **`MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY`** (default 3) distinct active validator buckets, **and** you must beat **every** earlier eligible miner (by commit block), including the base model, by at least **`THRESHOLD_MARGIN`** (default **2%**) on the stake-weighted **global binary win rate** (a "win" = per-eval continuous score ≥ `PASS_THRESHOLD` 0.9). Additionally, each hotkey is limited to **2** valid on-chain commits after block 8,270,310 — exceeding this cap marks you invalid.
 - **What counts as a "win" per evaluation?** Each evaluation produces a continuous score in `[0,1]` from 9 weighted elements (script 0.30, naturalness 0.15, gender 0.10, speed 0.10, emotion 0.10, age_group 0.10, pitch 0.05, accent 0.05, tone 0.05). If that score ≥ **0.9**, `generated_wins = true`. The binary win/lose flag — not the continuous score — is what drives ranking.
 - **What if no miner is eligible?** Validators set weight **1.0 on UID 0** (burn key). All incentives for that cycle are burned. Burn also triggers if fewer than 3 active validators are usable, or no one beats every earlier participant by the margin.
 - **Why must my chute name contain "vocence"?** The owner validates participants by checking the Chutes deployment **name** (from Chutes API). This restricts the subnet to Vocence-related miners.
 - **How often are weights set?** Every **`CYCLE_LENGTH`** blocks (default 150, ~30 minutes). Executed at `block % CYCLE_LENGTH == CYCLE_OFFSET_BLOCKS` (default 15), ± `CYCLE_BLOCK_TOLERANCE` (2). Config: [config.py](https://github.com/vocence-78/vocence/blob/master/vocence/domain/config.py).
 - **What is the base model?** An owner-deployed reference model (e.g. qwen3-voicedesign-base). It is treated as committed at **`BASE_MODEL_COMMIT_BLOCK`** (1000). Miners must beat its global win rate by **2%** to win. See [docs/base-model-protocol.md](https://github.com/vocence-78/vocence/blob/master/docs/base-model-protocol.md).
-- **What is the per-hotkey commit cap?** After block **8,081,000**, each hotkey can have at most **2** valid on-chain commits. Only field-valid commits count toward the cap (malformed commits are ignored). If a hotkey exceeds the limit, it is marked invalid (`too_many_commits`). This is enforced in the owner-side participant validation. Config: `COMMIT_LOCK_BLOCK` (8081000), `MAX_POST_CUTOVER_COMMITS` (2).
+- **What is the per-hotkey commit cap?** After block **8,270,310**, each hotkey can have at most **2** valid on-chain commits. Only field-valid post-cutover commits count toward the cap (commits before the cutover are ignored entirely). If a hotkey exceeds the limit, it is marked invalid (`too_many_commits`). Config: `COMMIT_LOCK_BLOCK` (8270310), `MAX_POST_CUTOVER_COMMITS` (2).
+- **What files must be in my HF repo?** Exactly the files listed in the file manifest (see §5). No extra files allowed. All required files must be present. `miner.py` must be the canonical locked version (byte-identical). `vocence_config.yaml` must declare `model_name` matching your on-chain commitment. Combined `.safetensors` must be ≥ 50 MiB.
 - **How does winner selection work?** Order by commit block → keep only globally eligible miners → among eligible, keep only those whose `global_win_rate` beats **every** earlier eligible miner by `THRESHOLD_MARGIN` → tie-break by (1) global_win_rate, (2) eligible_validator_count, (3) weighted_evals, (4) earliest commit block, (5) lexicographically smaller hotkey. Code: [coordinator.py](https://github.com/vocence-78/vocence/blob/master/vocence/engine/coordinator.py), [global_scoring.py](https://github.com/vocence-78/vocence/blob/master/vocence/ranking/global_scoring.py).
 - **What makes a validator "active"?** It submitted evaluation data within the last `ACTIVE_VALIDATOR_WINDOW_HOURS` (default 24). The owner API publishes this list; validators use it to decide whose buckets to read.
 - **Can I run generator and validator separately?** Yes: `vocence services generator` and `vocence services validator`. See [docs/CLI.md](https://github.com/vocence-78/vocence/blob/master/docs/CLI.md).
@@ -484,4 +535,4 @@ Canonical `/speak` payload: `{"text": "<transcription>", "instruction": "gender:
 
 ---
 
-*This knowledge base is used by the Vocence Discord/Telegram assistant. Last updated: 2026-04-29 (reflects PR #7 — threshold margin lowered to 2%, per-hotkey commit cap of 2 after block 8,081,000). For the single source of truth, always refer to the [vocence-78/vocence](https://github.com/vocence-78/vocence) repository and its docs.*
+*This knowledge base is used by the Vocence Discord/Telegram assistant. Last updated: 2026-05-26 (reflects PR #27–#30 — locked miner.py enforcement, file manifest validation, vocence_config.yaml model_name check, COMMIT_LOCK_BLOCK bumped to 8,270,310, tensor collision eviction fixes, version 0.1.1). For the single source of truth, always refer to the [vocence-78/vocence](https://github.com/vocence-78/vocence) repository and its docs.*

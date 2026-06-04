@@ -181,6 +181,20 @@ export async function registerCommands(config: Config, clientId: string) {
   });
 }
 
+// ── Guild / Channel Gate ───────────────────────────────────────────────────
+// Returns true if the bot should act on events from this channel/guild.
+// Primary guild = all channels. External guilds = only whitelisted channel IDs.
+
+function isPermittedChannel(
+  guildId: string | null,
+  channelId: string,
+  config: Config
+): boolean {
+  if (!guildId) return false;
+  if (guildId === config.guildId) return true;
+  return config.externalChannels.has(channelId);
+}
+
 // ── Event Wiring ────────────────────────────────────────────────────────────
 
 export function wireEvents(client: Client, config: Config, queue: DiscordSendQueue) {
@@ -491,8 +505,9 @@ async function handleMessage(msg: Message, config: Config, queue: DiscordSendQue
 
   await ensureWorkspace(config, channelName);
 
+  // Only respond in threads that were initialized via /thread (RALPH threads).
+  // Random user-created threads are ignored — never auto-init RALPH.
   if (isInThread && threadName && !(await threadIsInitialized(config, channelName, threadName))) {
-    await initializeThreadRalph(msg, config, queue, channelName, threadName);
     return;
   }
 
@@ -754,32 +769,8 @@ async function handleChannelCreate(
   config: Config,
   queue: DiscordSendQueue
 ) {
-  if (channel.type !== ChannelType.GuildText) return;
-  if (channel.name === MONITOR_CHANNEL_NAME) return;
-
-  mlog("info", "channel", `New channel created: #${channel.name}`);
-
-  await ensureWorkspace(config, channel.name);
-  const ctx = await resolveContext(config, channel.name);
-  const pinContent = await readPin(ctx.pinPath);
-  const vars = buildPlaceholderVars(config, channel.name, { cwd: ctx.cwd });
-  const filledPin = fillPlaceholders(pinContent, vars);
-  const banner = formatPinnedMessage({
-    cwd: ctx.cwd,
-    channelName: channel.name,
-    pin: filledPin,
-  });
-
-  try {
-    const topic = buildChannelTopic(ctx.cwd);
-    await channel.setTopic(topic).catch(() => {});
-    const pinMsg = await channel.send(`\`\`\`\n${banner}\n\`\`\``);
-    await pinMsg.pin();
-  } catch (err) {
-    mlog("error", "channel", `Failed to pin in #${channel.name}`, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  // Do nothing — never react to new channels. Only respond when pinged.
+  return;
 }
 
 // ── Thread Create Handler ────────────────────────────────────────────────────
@@ -789,24 +780,8 @@ async function handleThreadCreate(
   newlyCreated: boolean,
   config: Config
 ) {
-  if (!newlyCreated) return;
-
-  const parentChannel = thread.parent as TextChannel | null;
-  if (!parentChannel) return;
-  if (parentChannel.name === MONITOR_CHANNEL_NAME) return;
-
-  const channelName = parentChannel.name;
-  await ensureWorkspace(config, channelName);
-  const cwd = await resolveChannelCwd(config, channelName);
-
-  try {
-    const header = await thread.send(`\`\`\`\nCWD: ${cwd}\n\`\`\``);
-    await header.pin().catch(() => {});
-  } catch (err) {
-    mlog("error", "thread", `Failed to post header in thread ${thread.name}`, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  // Do nothing — never react to new threads. Only respond when pinged.
+  return;
 }
 
 // ── Channel / Thread Delete Handlers ────────────────────────────────────────
